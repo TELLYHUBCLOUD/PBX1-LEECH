@@ -140,15 +140,12 @@ def handleIndex(index, dic):
     
 
 def get_progress_bar_string(pct):
-    pct = float(str(pct).strip('%'))
+    pct = float(str(pct).strip("%"))
     p = min(max(pct, 0), 100)
     cFull = int(p // 8)
-    cPart = int(p % 8 - 1)
-    p_str = '●' * cFull
-    if cPart >= 0:
-        p_str += ['◌', '○', '○', '◎', '◉', '◕', '●'][cPart]
-    p_str += '◌' * (12 - cFull)
-    return f"[{p_str}]"
+    p_str = "⬢" * cFull
+    p_str += "⬡" * (12 - cFull)
+    return f'<p><a href="https://t.me/TELLYMIRROR">{p_str}</a></p>'
 
 
 def get_all_versions():
@@ -204,6 +201,7 @@ class EngineStatus:
 
 
 def get_readable_message():
+    msg = '<blockquote><a href="https://t.me/TELLYMIRROR"><b>⚡ POWERED BY TELLY MIRROR 🤖</b></a></blockquote>'
     msg = ""
     button = None
     STATUS_LIMIT = config_dict['STATUS_LIMIT']
