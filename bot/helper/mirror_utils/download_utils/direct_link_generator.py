@@ -586,89 +586,108 @@ def uploadee(url):
         raise DirectDownloadLinkException("ERROR: Direct Link not found")
 
 def terabox(url):
-    if not path.isfile('terabox.txt'):
+    cookie_file = 'terabox.txt'
+    if not path.isfile(cookie_file):
         raise DirectDownloadLinkException("ERROR: terabox.txt not found")
+    
     try:
-        jar = MozillaCookieJar('terabox.txt')
-        jar.load()
+        jar = MozillaCookieJar(cookie_file)
+        jar.load(ignore_discard=True, ignore_expires=True)
     except Exception as e:
         raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}") from e
-    cookies = {}
-    for cookie in jar:
-        cookies[cookie.name] = cookie.value
-    details = {'contents':[], 'title': '', 'total_size': 0}
-    details["header"] = ' '.join(f'{key}: {value}' for key, value in cookies.items())
 
-    def __fetch_links(session, dir_='', folderPath=''):
-        params = {
-            'app_id': '250528',
-            'jsToken': jsToken,
-            'shorturl': shortUrl
-            }
-        if dir_:
-            params['dir'] = dir_
-        else:
-            params['root'] = '1'
-        try:
-            _json = session.get("https://www.1024tera.com/share/list", params=params, cookies=cookies).json()
-        except Exception as e:
-            raise DirectDownloadLinkException(f'ERROR: {e.__class__.__name__}')
-        if _json['errno'] not in [0, '0']:
-            if 'errmsg' in _json:
-                raise DirectDownloadLinkException(f"ERROR: {_json['errmsg']}")
-            else:
-                raise DirectDownloadLinkException('ERROR: Something went wrong!')
-
-        if "list" not in _json:
-            return
-        contents = _json["list"]
-        for content in contents:
-            if content['isdir'] in ['1', 1]:
-                if not folderPath:
-                    if not details['title']:
-                        details['title'] = content['server_filename']
-                        newFolderPath = path.join(details['title'])
-                    else:
-                        newFolderPath = path.join(details['title'], content['server_filename'])
-                else:
-                    newFolderPath = path.join(folderPath, content['server_filename'])
-                __fetch_links(session, content['path'], newFolderPath)
-            else:
-                if not folderPath:
-                    if not details['title']:
-                        details['title'] = content['server_filename']
-                    folderPath = details['title']
-                item = {
-                    'url': content['dlink'],
-                    'filename': content['server_filename'],
-                    'path' : path.join(folderPath),
-                }
-                if 'size' in content:
-                    size = content["size"]
-                    if isinstance(size, str) and size.isdigit():
-                        size = float(size)
-                    details['total_size'] += size
-                details['contents'].append(item)
+    cookies = {cookie.name: cookie.value for cookie in jar}
+    details = {'contents': [], 'title': '', 'total_size': 0, 'header': ''}
 
     with Session() as session:
+        # Extract jsToken and shortUrl
         try:
-            _res = session.get(url, cookies=cookies)
+            response = session.get(url, cookies=cookies)
+            response.raise_for_status()
         except Exception as e:
-            raise DirectDownloadLinkException(f'ERROR: {e.__class__.__name__}')
-        if jsToken := findall(r'window\.jsToken.*%22(.*)%22', _res.text):
-            jsToken = jsToken[0]
-        else:
-            raise DirectDownloadLinkException('ERROR: jsToken not found!.')
-        shortUrl = parse_qs(urlparse(_res.url).query).get('surl')
+            raise DirectDownloadLinkException(f'Initial request failed: {e.__class__.__name__}')
+
+        # Find jsToken in response text
+        jsToken_match = findall(r'window\.jsToken\s*=\s*["\']([^"\']+)', response.text)
+        if not jsToken_match:
+            raise DirectDownloadLinkException('jsToken not found in page')
+        jsToken = jsToken_match[0]
+
+        # Extract short URL parameter (surl)
+        query = parse_qs(urlparse(response.url).query)
+        shortUrl = query.get('surl', [None])[0]
         if not shortUrl:
-            raise DirectDownloadLinkException("ERROR: Could not find surl")
+            raise DirectDownloadLinkException("surl parameter not found in URL")
+
+        # Recursive function to fetch links
+        def fetch_links(session, current_dir='', folder_path=''):
+            nonlocal details
+            params = {
+                'app_id': '250528',
+                'jsToken': jsToken,
+                'shorturl': shortUrl,
+            }
+            if current_dir:
+                params['dir'] = current_dir
+            else:
+                params['root'] = '1'
+
+            try:
+                api_response = session.get(
+                    "https://www.1024tera.com/api/share/list",
+                    params=params,
+                    cookies=cookies,
+                    headers={'User-Agent': 'Mozilla/5.0'}
+                )
+                api_response.raise_for_status()
+                data = api_response.json()
+            except Exception as e:
+                raise DirectDownloadLinkException(f'API request failed: {e.__class__.__name__}')
+
+            if data.get('errno', -1) not in [0, '0']:
+                raise DirectDownloadLinkException(f"API error: {data.get('errmsg', 'Unknown error')}")
+
+            for item in data.get('list', []):
+                if item.get('isdir') in [1, '1']:  # Folder
+                    new_folder = item['server_filename']
+                    new_path = path.join(folder_path, new_folder) if folder_path else new_folder
+                    fetch_links(session, item['path'], new_path)
+                else:  # File
+                    filename = item['server_filename']
+                    file_path = folder_path or details.get('title', '')
+                    
+                    if not details['title'] and not folder_path:
+                        details['title'] = filename
+                    
+                    file_entry = {
+                        'url': item.get('dlink', ''),
+                        'filename': filename,
+                        'path': file_path,
+                    }
+                    
+                    # Handle file size
+                    size = item.get('size', 0)
+                    try:
+                        size = float(size) if isinstance(size, str) else size
+                    except ValueError:
+                        size = 0
+                    details['total_size'] += size
+                    
+                    details['contents'].append(file_entry)
+
+        # Start processing
         try:
-            __fetch_links(session)
+            fetch_links(session)
         except Exception as e:
-            raise DirectDownloadLinkException(e)
+            raise DirectDownloadLinkException(f'Processing failed: {str(e)}')
+
+    # Return appropriate result
     if len(details['contents']) == 1:
         return details['contents'][0]['url']
+    
+    details['header'] = '; '.join([f'{k}={v}' for k, v in cookies.items()])
     return details
+
 
 
 def gofile(url, auth):
